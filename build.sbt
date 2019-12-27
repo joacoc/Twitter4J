@@ -6,6 +6,7 @@ libraryDependencies += "org.apache.logging.log4j" % "log4j-api" % "2.13.0"
 libraryDependencies += "org.apache.logging.log4j" % "log4j-core" % "2.13.0"
 libraryDependencies += "org.apache.kafka" % "kafka-clients" % "2.4.0"
 libraryDependencies += "org.mongodb.scala" %% "mongo-scala-driver" % "2.7.0"
+libraryDependencies += "com.fasterxml.jackson.module" %% "jackson-module-scala" % "2.10.1"
 
 version := "0.1"
 

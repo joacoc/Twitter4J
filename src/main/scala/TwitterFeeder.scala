@@ -1,5 +1,7 @@
 import java.util.Properties
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.logging.log4j.{Level, LogManager}
 import org.mongodb.scala.{MongoClient, MongoCollection, MongoDatabase, Observer}
@@ -55,11 +57,15 @@ object TwitterFeeder {
     props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
     props.put("acks","all")
     val producer = new KafkaProducer[String, String](props)
+    val mapper: ObjectMapper = new ObjectMapper()
 
     val listener = new StatusListener {
       override def onStatus(status: Status): Unit = {
-        logger.log(Level.DEBUG, status.getText)
-        val stringJSON = s"""{"text": ${status.getText}, "timestamp": ${status.getCreatedAt.getTime}}"""
+        val objectNode: ObjectNode = mapper.createObjectNode()
+        objectNode.put("text", status.getText)
+        objectNode.put("timestamp", status.getCreatedAt.getTime)
+
+        val stringJSON = objectNode.toPrettyString
         val record = new ProducerRecord[String, String](topic,  stringJSON)
         producer.send(record)
       }
