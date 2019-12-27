@@ -63,8 +63,13 @@ object TwitterFeeder {
     val listener = new StatusListener {
       override def onStatus(status: Status): Unit = {
         val objectNode: ObjectNode = mapper.createObjectNode()
-        objectNode.put("text", status.getText)
         objectNode.put("timestamp", status.getCreatedAt.getTime)
+
+        if (status.isRetweet) {
+          objectNode.put("text", status.getRetweetedStatus.getText)
+        } else {
+          objectNode.put("text", status.getText)
+        }
 
         val stringJSON = objectNode.toPrettyString
         val record = new ProducerRecord[String, String](topic,  stringJSON)
