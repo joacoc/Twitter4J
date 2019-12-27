@@ -48,6 +48,7 @@ object TwitterFeeder {
       .setOAuthConsumerSecret(CONSUMER_SECRET)
       .setOAuthAccessToken(ACCESS_TOKEN)
       .setOAuthAccessTokenSecret(ACCESS_TOKEN_SECRET)
+      .setTweetModeExtended(true)
     val tf: TwitterStreamFactory = new TwitterStreamFactory(cb.build())
     val twitterStream: TwitterStream = tf.getInstance()
 
@@ -95,8 +96,10 @@ object TwitterFeeder {
 
     new Thread {
       override def run: Unit = {
-        tagsCollection.find().subscribe(createTagsObserver(twitterStream))
-        Thread.sleep(60000)
+        while (true) {
+          tagsCollection.find().subscribe(createTagsObserver(twitterStream))
+          Thread.sleep(60000)
+        }
       }
     }.start()
   }
