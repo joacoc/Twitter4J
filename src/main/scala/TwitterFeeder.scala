@@ -6,42 +6,57 @@ import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.logging.log4j.{Level, LogManager}
 import org.mongodb.scala.{MongoClient, MongoCollection, MongoDatabase, Observer}
 import org.mongodb.scala.bson.Document
+import org.mongodb.scala.model.Projections.{include, exclude}
 import twitter4j.{FilterQuery, StallWarning, Status, StatusDeletionNotice, StatusListener, TwitterStream, TwitterStreamFactory}
 import twitter4j.conf.ConfigurationBuilder
+import org.mongodb.scala.bson.codecs.Macros._
+import org.mongodb.scala.bson.codecs.DEFAULT_CODEC_REGISTRY
+import org.bson.codecs.configuration.CodecRegistries.{fromProviders, fromRegistries}
+import org.bson.codecs.configuration.CodecRegistry
 
 import scala.collection.mutable
 
 object TwitterFeeder {
 
   /* Twitter Config Variables */
-  val CONSUMER_KEY: String = sys.env("TWITTER_CONSUER_KEY")
+  val CONSUMER_KEY: String = sys.env("TWITTER_CONSUMER_KEY")
   val CONSUMER_SECRET: String = sys.env("TWITTER_CONSUMER_SECRET")
   val ACCESS_TOKEN: String = sys.env("TWITTER_ACCESS_TOKEN")
-  val ACCESS_TOKEN_SECRET: String = sys.env("TWITTER_ACESS_TOKEN_SECRET")
-
+  val ACCESS_TOKEN_SECRET: String = sys.env("TWITTER_ACCESS_TOKEN_SECRET")
 
   /* Mongo Config Variables */
-  val MONGO_USERNAME: String = sys.env("MONGO_TWEEPY_USER")
-  val MONGO_PASSWORD: String = sys.env("MONGO_TWEEPY_PSW")
-  val MONGO_TWEETS_DB: String = sys.env("MONGO_TWEETS_DB")
+  val MONGO_USER: String = sys.env("MONGO_USER")
+  val MONGO_PSW: String = sys.env("MONGO_PSW")
+  val MONGO_DB: String = sys.env("MONGO_DB")
   val MONGO_IP: String = sys.env("MONGO_IP")
-  val MONGO_DB: String = sys.env("MONGO_TWEETS_DB")
-  val MONGO_AUTH_DB: String = sys.env("MONGO_AUTH_DB")
+  val MONGO_CONFIG_COLLECTION: String = sys.env("MONGO_CONFIG_COLLECTION")
 
-  private val mongoClient: MongoClient = MongoClient(s"mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@${MONGO_IP}/${MONGO_TWEETS_DB}?authSource=${MONGO_AUTH_DB}")
-  private val database: MongoDatabase = mongoClient.getDatabase(MONGO_TWEETS_DB)
-  private val tagsCollection: MongoCollection[Document] = database.getCollection("tags")
-  private val tagsValues: mutable.HashMap[Int,String] = new mutable.HashMap[Int,String]
+  /* Mongo Client Init */
+  val mongoUri: String = s"mongodb+srv://${MONGO_USER}:${MONGO_PSW}@${MONGO_IP}/${MONGO_DB}?retryWrites=true&w=majority"
+  private val codecRegistry: CodecRegistry = fromRegistries(fromProviders(classOf[ConfigDocument], classOf[Options]), DEFAULT_CODEC_REGISTRY )
+  private val mongoClient: MongoClient = MongoClient(mongoUri)
+  private val database: MongoDatabase = mongoClient.getDatabase(MONGO_DB).withCodecRegistry(codecRegistry)
+  private val configCollection: MongoCollection[ConfigDocument] = database.getCollection(MONGO_CONFIG_COLLECTION)
+  private val tags: mutable.HashMap[Int,String] = new mutable.HashMap[Int,String]
 
   /* Kafka Config Variables */
   val KAFKA_BROKER_IP: String = sys.env("KAFKA_BROKER_IP")
-  val topic = "tweets"
+  val topic = sys.env("KAFKA_TWEETS_TOPIC")
 
   /* Logger */
   private val logger = LogManager.getLogger(TwitterFeeder.getClass)
 
   def main(args: Array[String]): Unit = {
 
+    /* Kafka Properties & Set Up */
+    val props: Properties = new Properties()
+    props.put("bootstrap.servers",s"${KAFKA_BROKER_IP}:9092")
+    props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+    props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+    props.put("acks","all")
+    val producer = new KafkaProducer[String, String](props)
+
+    /* Twitter Streaming configuration build */
     val cb: ConfigurationBuilder = new ConfigurationBuilder()
     cb.setDebugEnabled(true)
       .setOAuthConsumerKey(CONSUMER_KEY)
@@ -52,12 +67,7 @@ object TwitterFeeder {
     val tf: TwitterStreamFactory = new TwitterStreamFactory(cb.build())
     val twitterStream: TwitterStream = tf.getInstance()
 
-    val props: Properties = new Properties()
-    props.put("bootstrap.servers",s"${KAFKA_BROKER_IP}:9092")
-    props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
-    props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
-    props.put("acks","all")
-    val producer = new KafkaProducer[String, String](props)
+    /* Twitter Status listener */
     val mapper: ObjectMapper = new ObjectMapper()
 
     val listener = new StatusListener {
@@ -99,10 +109,11 @@ object TwitterFeeder {
 
     twitterStream.addListener(listener)
 
+    /* Tags & Config retrieving */
     new Thread {
       override def run: Unit = {
         while (true) {
-          tagsCollection.find().subscribe(createTagsObserver(twitterStream))
+          configCollection.find().subscribe(createTagsObserver(twitterStream))
           Thread.sleep(60000)
         }
       }
@@ -110,34 +121,31 @@ object TwitterFeeder {
   }
 
 
-  private def createTagsObserver(twitterStream: TwitterStream): Observer[Document] = {
-    new Observer[Document] {
+  private def createTagsObserver(twitterStream: TwitterStream): Observer[ConfigDocument] = {
+    new Observer[ConfigDocument] {
       val newValues: mutable.HashMap[Int,String] = new mutable.HashMap[Int,String]
       var newValuesDetected = false
 
-      override def onNext(result: Document): Unit = {
-        val newTag = result.getString("tag")
-
-        newTag match {
-          case tag: String =>
-            val hashCode = tag.toLowerCase().hashCode()
-            newValues.put(hashCode, tag.toLowerCase())
-            if (!tagsValues.contains(hashCode)) {
-              newValuesDetected = true
-            }
-
-          case _ =>
-        }
+      override def onNext(configDocument: ConfigDocument): Unit = {
+        configDocument.options.tags.foreach(tag => {
+          val hashCode = tag.toLowerCase().hashCode()
+          newValues.put(hashCode, tag.toLowerCase())
+          if (!tags.contains(hashCode)) {
+            newValuesDetected = true
+          }
+        })
       }
 
-      override def onError(e: Throwable): Unit = {}
+      override def onError(e: Throwable): Unit = {
+        logger.error(e)
+      }
 
       override def onComplete(): Unit = {
         if (newValuesDetected) {
-          tagsValues.clear()
+          tags.clear()
           newValues.valuesIterator.foreach(tag => {
             val hashCode = tag.toLowerCase().hashCode()
-            tagsValues.put(hashCode, tag.toLowerCase())
+            tags.put(hashCode, tag.toLowerCase())
           })
 
           logger.info("Changing twitter track")
@@ -151,3 +159,6 @@ object TwitterFeeder {
     }
   }
 }
+
+case class Options(tags: Vector[String], windowsTimes: Vector[Int], stopwords: Vector[String])
+case class ConfigDocument(options: Options)
