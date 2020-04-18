@@ -24,6 +24,10 @@ object TwitterFeeder {
   val ACCESS_TOKEN: String = sys.env("TWITTER_ACCESS_TOKEN")
   val ACCESS_TOKEN_SECRET: String = sys.env("TWITTER_ACCESS_TOKEN_SECRET")
 
+  /* Kafka Config Variables */
+  val KAFKA_BROKER_IP: String = sys.env("KAFKA_BROKER_IP")
+  val KAFKA_TWEETS_TOPIC = sys.env("KAFKA_TWEETS_TOPIC")
+
   /* Mongo Config Variables */
   val MONGO_USER: String = sys.env("MONGO_USER")
   val MONGO_PSW: String = sys.env("MONGO_PSW")
@@ -38,10 +42,6 @@ object TwitterFeeder {
   private val database: MongoDatabase = mongoClient.getDatabase(MONGO_DB).withCodecRegistry(codecRegistry)
   private val configCollection: MongoCollection[ConfigDocument] = database.getCollection(MONGO_CONFIG_COLLECTION)
   private val tags: mutable.HashMap[Int,String] = new mutable.HashMap[Int,String]
-
-  /* Kafka Config Variables */
-  val KAFKA_BROKER_IP: String = sys.env("KAFKA_BROKER_IP")
-  val topic = sys.env("KAFKA_TWEETS_TOPIC")
 
   /* Logger */
   private val logger = LogManager.getLogger(TwitterFeeder.getClass)
@@ -82,7 +82,7 @@ object TwitterFeeder {
         }
 
         val stringJSON = objectNode.toPrettyString
-        val record = new ProducerRecord[String, String](topic,  stringJSON)
+        val record = new ProducerRecord[String, String](KAFKA_TWEETS_TOPIC,  stringJSON)
         producer.send(record)
       }
 
