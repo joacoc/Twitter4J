@@ -7,6 +7,8 @@ import twitter4j.{FilterQuery, StallWarning, Status, StatusDeletionNotice, Statu
 import twitter4j.conf.ConfigurationBuilder
 import edu.stanford.nlp.pipeline.{CoreDocument, StanfordCoreNLP}
 
+import scala.io.Source
+
 object TwitterFeeder {
 
   /* Twitter Config Variables */
@@ -19,15 +21,6 @@ object TwitterFeeder {
   val KAFKA_BROKER_IP: String = sys.env("KAFKA_BROKER_IP")
   val KAFKA_TWEETS_TOPIC = sys.env("KAFKA_TWEETS_TOPIC")
 
-  /* Mongo Config Variables */
-//  val MATERIALIZE_USER: String = sys.env("MATERIALIZE_USER")
-//  val MATERIALIZE_PSW: String = sys.env("MATERIALIZE_PSW")
-//  val MATERIALIZE_DB: String = sys.env("MATERIALIZE_DB")
-//  val MATERIALIZE_IP: String = sys.env("MATERIALIZE_IP")
-
-  /* Materialize Client */
-//  val materializeUri: String = s"localhost:6875";
-
   /* Logger */
   private val logger = LogManager.getLogger(TwitterFeeder.getClass)
 
@@ -35,7 +28,7 @@ object TwitterFeeder {
 
     /* Kafka Properties & Set Up */
     val props: Properties = new Properties()
-    props.put("bootstrap.servers", s"${KAFKA_BROKER_IP}:9092")
+    props.put("bootstrap.servers", s"${KAFKA_BROKER_IP}:29092")
     props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
     props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
     props.put("acks", "all")
@@ -62,6 +55,10 @@ object TwitterFeeder {
     tokenizerProperties.setProperty("annotators", "tokenize")
     val pipeline = new StanfordCoreNLP(tokenizerProperties)
 
+    /* Stopwords detector */
+    val filename = "data/stopwords"
+    val stopwords = Source.fromFile(filename).getLines.toVector.map(x => x.hashCode).toSet
+
     /* Twitter Status listener */
     val listener = new StatusListener {
       override def onStatus(status: Status): Unit = {
@@ -78,15 +75,20 @@ object TwitterFeeder {
 
         /* Send each token to kafka */
         tokens.forEach(token => {
-          /* Turn values into an object node */
-          val objectNode: ObjectNode = mapper.createObjectNode()
-          objectNode.put("timestamp", timestamp)
-          objectNode.put("text", token.word())
+          val word = token.word()
+          val wordHashCode = word.hashCode
 
-          /* Send record data as JSON */
-          val stringJSON = objectNode.toPrettyString
-          val record = new ProducerRecord[String, String](KAFKA_TWEETS_TOPIC, stringJSON)
-          producer.send(record)
+          if (!stopwords.contains(wordHashCode)) {
+            /* Turn values into an object node */
+            val objectNode: ObjectNode = mapper.createObjectNode()
+            objectNode.put("timestamp", timestamp)
+            objectNode.put("text", token.word())
+
+            /* Send record data as JSON */
+            val stringJSON = objectNode.toPrettyString
+            val record = new ProducerRecord[String, String](KAFKA_TWEETS_TOPIC, stringJSON)
+            producer.send(record)
+          }
         })
       }
 
@@ -124,6 +126,3 @@ object TwitterFeeder {
     twitterStream.filter(newTweetFilterQuery)
   }
 }
-
-case class Options(tags: Vector[String], windowsTimes: Vector[Int], stopwords: Vector[String])
-case class ConfigDocument(options: Options)
