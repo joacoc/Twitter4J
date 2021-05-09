@@ -76,13 +76,13 @@ object TwitterFeeder {
         /* Send each token to kafka */
         tokens.forEach(token => {
           val word = token.word()
-          val wordHashCode = word.hashCode
+          val wordHashCode = word.toLowerCase.hashCode
 
           if (!stopwords.contains(wordHashCode)) {
             /* Turn values into an object node */
             val objectNode: ObjectNode = mapper.createObjectNode()
             objectNode.put("timestamp", timestamp)
-            objectNode.put("text", token.word())
+            objectNode.put("text", word)
 
             /* Send record data as JSON */
             val stringJSON = objectNode.toPrettyString
