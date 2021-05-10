@@ -1,20 +1,13 @@
 import java.util.Properties
-
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.logging.log4j.{Level, LogManager}
-import org.mongodb.scala.{MongoClient, MongoCollection, MongoDatabase, Observer}
-import org.mongodb.scala.bson.Document
-import org.mongodb.scala.model.Projections.{include, exclude}
 import twitter4j.{FilterQuery, StallWarning, Status, StatusDeletionNotice, StatusListener, TwitterStream, TwitterStreamFactory}
 import twitter4j.conf.ConfigurationBuilder
-import org.mongodb.scala.bson.codecs.Macros._
-import org.mongodb.scala.bson.codecs.DEFAULT_CODEC_REGISTRY
-import org.bson.codecs.configuration.CodecRegistries.{fromProviders, fromRegistries}
-import org.bson.codecs.configuration.CodecRegistry
+import edu.stanford.nlp.pipeline.{CoreDocument, StanfordCoreNLP}
 
-import scala.collection.mutable
+import scala.io.Source
 
 object TwitterFeeder {
 
@@ -28,21 +21,6 @@ object TwitterFeeder {
   val KAFKA_BROKER_IP: String = sys.env("KAFKA_BROKER_IP")
   val KAFKA_TWEETS_TOPIC = sys.env("KAFKA_TWEETS_TOPIC")
 
-  /* Mongo Config Variables */
-  val MONGO_USER: String = sys.env("MONGO_USER")
-  val MONGO_PSW: String = sys.env("MONGO_PSW")
-  val MONGO_DB: String = sys.env("MONGO_DB")
-  val MONGO_IP: String = sys.env("MONGO_IP")
-  val MONGO_CONFIG_COLLECTION: String = sys.env("MONGO_CONFIG_COLLECTION")
-
-  /* Mongo Client Init */
-  val mongoUri: String = s"mongodb+srv://${MONGO_USER}:${MONGO_PSW}@${MONGO_IP}/${MONGO_DB}?retryWrites=true&w=majority"
-  private val codecRegistry: CodecRegistry = fromRegistries(fromProviders(classOf[ConfigDocument], classOf[Options]), DEFAULT_CODEC_REGISTRY )
-  private val mongoClient: MongoClient = MongoClient(mongoUri)
-  private val database: MongoDatabase = mongoClient.getDatabase(MONGO_DB).withCodecRegistry(codecRegistry)
-  private val configCollection: MongoCollection[ConfigDocument] = database.getCollection(MONGO_CONFIG_COLLECTION)
-  private val tags: mutable.HashMap[Int,String] = new mutable.HashMap[Int,String]
-
   /* Logger */
   private val logger = LogManager.getLogger(TwitterFeeder.getClass)
 
@@ -50,10 +28,10 @@ object TwitterFeeder {
 
     /* Kafka Properties & Set Up */
     val props: Properties = new Properties()
-    props.put("bootstrap.servers",s"${KAFKA_BROKER_IP}:9092")
+    props.put("bootstrap.servers", s"${KAFKA_BROKER_IP}:29092")
     props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
     props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
-    props.put("acks","all")
+    props.put("acks", "all")
     val producer = new KafkaProducer[String, String](props)
 
     /* Twitter Streaming configuration build */
@@ -64,28 +42,57 @@ object TwitterFeeder {
       .setOAuthAccessToken(ACCESS_TOKEN)
       .setOAuthAccessTokenSecret(ACCESS_TOKEN_SECRET)
       .setTweetModeExtended(true)
+
+    /* Build twitter stream */
     val tf: TwitterStreamFactory = new TwitterStreamFactory(cb.build())
     val twitterStream: TwitterStream = tf.getInstance()
 
-    /* Twitter Status listener */
+    /* Object mapper used to create string JSON */
     val mapper: ObjectMapper = new ObjectMapper()
 
+    /* Stanford tokenizer */
+    val tokenizerProperties: Properties = new Properties()
+    tokenizerProperties.setProperty("annotators", "tokenize")
+    val pipeline = new StanfordCoreNLP(tokenizerProperties)
+
+    /* Stopwords detector */
+    val filename = "data/stopwords"
+    val stopwords = Source.fromFile(filename).getLines.toVector.map(x => x.hashCode).toSet
+
+    /* Twitter Status listener */
     val listener = new StatusListener {
       override def onStatus(status: Status): Unit = {
-        val objectNode: ObjectNode = mapper.createObjectNode()
-        objectNode.put("timestamp", status.getCreatedAt.getTime)
+        /* Get tweet information */
+        val tweetText = if (status.isRetweet) status.getRetweetedStatus.getText else status.getText
+        val timestamp = status.getCreatedAt.getTime
 
-        if (status.isRetweet) {
-          objectNode.put("text", status.getRetweetedStatus.getText)
-        } else {
-          objectNode.put("text", status.getText)
-        }
+        /* Tokenize tweet text */
+        val doc: CoreDocument = new CoreDocument(tweetText)
+        pipeline.annotate(doc)
 
-        val stringJSON = objectNode.toPrettyString
-        val record = new ProducerRecord[String, String](KAFKA_TWEETS_TOPIC,  stringJSON)
-        producer.send(record)
+        /* Get tokens */
+        val tokens = doc.tokens()
+
+        /* Send each token to kafka */
+        tokens.forEach(token => {
+          val word = token.word()
+          val wordHashCode = word.toLowerCase.hashCode
+
+          if (!stopwords.contains(wordHashCode)) {
+            /* Turn values into an object node */
+            val objectNode: ObjectNode = mapper.createObjectNode()
+            objectNode.put("timestamp", timestamp)
+            objectNode.put("text", word)
+
+            /* Send record data as JSON */
+            val stringJSON = objectNode.toPrettyString
+            val record = new ProducerRecord[String, String](KAFKA_TWEETS_TOPIC, stringJSON)
+            producer.send(record)
+          }
+        })
       }
 
+      /* Warnings */
       override def onDeletionNotice(statusDeletionNotice: StatusDeletionNotice): Unit = {
         logger.log(Level.WARN, s"Deletion Notice ${statusDeletionNotice.toString}")
       }
@@ -107,58 +114,15 @@ object TwitterFeeder {
       }
     }
 
+    /* Add listener */
     twitterStream.addListener(listener)
 
-    /* Tags & Config retrieving */
-    new Thread {
-      override def run: Unit = {
-        while (true) {
-          configCollection.find().subscribe(createTagsObserver(twitterStream))
-          Thread.sleep(60000)
-        }
-      }
-    }.start()
-  }
+    /* Set up filter */
+    val newTweetFilterQuery: FilterQuery = new FilterQuery()
+    newTweetFilterQuery.track("eth", "ethereum", "$eth", "ether")
+    newTweetFilterQuery.language("en")
 
-
-  private def createTagsObserver(twitterStream: TwitterStream): Observer[ConfigDocument] = {
-    new Observer[ConfigDocument] {
-      val newValues: mutable.HashMap[Int,String] = new mutable.HashMap[Int,String]
-      var newValuesDetected = false
-
-      override def onNext(configDocument: ConfigDocument): Unit = {
-        configDocument.options.tags.foreach(tag => {
-          val hashCode = tag.toLowerCase().hashCode()
-          newValues.put(hashCode, tag.toLowerCase())
-          if (!tags.contains(hashCode)) {
-            newValuesDetected = true
-          }
-        })
-      }
-
-      override def onError(e: Throwable): Unit = {
-        logger.error(e)
-      }
-
-      override def onComplete(): Unit = {
-        if (newValuesDetected) {
-          tags.clear()
-          newValues.valuesIterator.foreach(tag => {
-            val hashCode = tag.toLowerCase().hashCode()
-            tags.put(hashCode, tag.toLowerCase())
-          })
-
-          logger.info("Changing twitter track")
-          logger.info(s"New track: ${newValues.values.toString()}")
-          val newTweetFilterQuery: FilterQuery = new FilterQuery()
-          newTweetFilterQuery.track(newValues.values.toVector:_*)
-          newTweetFilterQuery.language("es")
-          twitterStream.filter(newTweetFilterQuery)
-        }
-      }
-    }
+    /* Filter tweets */
+    twitterStream.filter(newTweetFilterQuery)
   }
 }
-
-case class Options(tags: Vector[String], windowsTimes: Vector[Int], stopwords: Vector[String])
-case class ConfigDocument(options: Options)
